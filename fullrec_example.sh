@@ -1,0 +1,29 @@
+python main.py \
+    --data_dir your_file_dir/Project_DeepLF/data_example \
+    --tree_name TTree1 \
+    --scalar_branches example1_mass,example1_chisq,example2_mass,example2_chisq \
+    --array_spec [example_vector1,10],[example_vector2,10],[example_vector3,10] \
+    --target_branches is_sig,is_bkg \
+    --task classification \
+    --num_classes 2 \
+    --pos_class 0 \
+    --threshold 0.5 \
+    --model_class model.DRNmodfied.DRNmod \
+    --model_args '{"width":256, "depth":5, "dropout":0.25}' \
+    --loss_class model.focalloss.FocalLoss \
+    --loss_args '{"signal_class":0, "alpha":0.5, "gamma":2.0}' \
+    --epochs 100 \
+    --lr 0.00005 \
+    --batch_size 4096 \
+    --device cuda \
+    --val_ratio 0.5 \
+    --mode train \
+    --ckpt example_train.ckpt \
+    --num_workers 4 \
+    --plot_metrics \
+    --normalize \
+    --analyze_feature_importance \
+    --pred_prob \
+    --store_root \
+    --store_root_per_file \
+    --save_pred your_file_dir/Project_DeepLF_release/result_example
