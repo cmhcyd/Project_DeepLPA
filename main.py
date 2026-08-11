@@ -11,7 +11,7 @@ import traceback
 import json
 import time
 from utils.utils import _parse_name_list, get_files, build_dataset_kwargs, move_input_to_device, _unwrap_dataset, enable_train_hook, check_model_eval_state, _save_pred_to_outdir
-from utils.plot import plot_training_metrics
+from utils.plot import plot_training_metrics, plot_roc_and_distribution
 from utils.saveroot import save_split_root, save_merged_root
 from utils.dataset import ParticleDataset
 from utils.analyzeimportance import analyze_feature_importance
@@ -76,6 +76,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--device", type=str, default="cuda", help="cpu/cuda")
+    parser.add_argument("--load_ckpt", type=str, default="", help="Load model weights from this checkpoint before training (for fine-tuning or resuming). If not provided, start training from scratch.")
     # Early stopping
     parser.add_argument("--early_stop_patience", type=int, default=0,
                     help="Number of epochs with no improvement after which training stops. 0 = disable.")
@@ -99,6 +100,7 @@ def parse_args():
     parser.add_argument("--corr_max_features", type=int, default=None, help="Max number of features to include in correlation analysis (by variance)")
     parser.add_argument("--analyze_target_correlation", action="store_true", help="Analyze correlation between model features and external target branches")
     parser.add_argument("--target_corr_branches", type=str, default="", help="Comma-separated scalar branch names not used as model inputs but to compute correlation with input features, e.g. mass,energy")
+    parser.add_argument("--plot_roc", action="store_true", help="After training, evaluate best model on validation set and plot ROC + score distribution")
     # Inference output/save options (support no-label inference)
     parser.add_argument("--save_pred", type=str, default="", help="Path to save inference results (.npy), leave empty to skip")
     parser.add_argument("--pred_prob", action="store_true", help="Classification: output class probabilities instead of discrete class (discrete class also saved)")
@@ -654,6 +656,16 @@ def main():
     model_args = json.loads(args.model_args)
     model = model_class(in_dim=in_dim, num_classes=args.num_classes, task=args.task, **model_args)
     model = model.to(device)
+    if args.load_ckpt and os.path.exists(args.load_ckpt):
+        state_dict = torch.load(args.load_ckpt, map_location=device)
+        if 'model_state_dict' in state_dict:
+            state_dict = state_dict['model_state_dict']
+        if list(state_dict.keys())[0].startswith('module.'):
+            state_dict = {k[7:]: v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
+        print(f"[INFO] Successfully loaded model weights from {args.load_ckpt}")
+    elif args.load_ckpt:
+        print(f"[WARN] Checkpoint {args.load_ckpt} not found. Starting training from scratch.")
     print(f"Loaded model: {args.model_class} with args: {model_args}")
 
     print(f"Model parameter count: {sum(p.numel() for p in model.parameters())}")
@@ -905,6 +917,46 @@ def main():
                 print(f"Saved training curves to {out_dir_for_plots}/training_metrics.png")
             else:
                 print("Saved training curves: training_metrics.png")
+
+        if args.plot_roc and val_loader is not None and args.task == "classification":
+            if os.path.exists(args.ckpt):
+                model.load_state_dict(torch.load(args.ckpt, map_location=device))
+            model.eval()
+            y_true_all = []
+            y_score_all = []
+            with torch.no_grad():
+                for batch in val_loader:
+                    if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+                        x, y = batch[0], batch[1]
+                    else:
+                        continue
+                    x = move_input_to_device(x, device)
+                    y = y.to(device)
+                    logits = model(x)
+                    probs = torch.softmax(logits, dim=-1)
+                    if probs.shape[1] > args.pos_class:
+                        score = probs[:, args.pos_class]
+                    else:
+                        score = probs[:, 0]
+
+                    if y.ndim == 2 and y.size(-1) == 1:
+                        y_idx = y.view(-1)
+                    elif y.ndim == 1:
+                        y_idx = y
+                    else:
+                        y_idx = y.argmax(dim=-1)
+                    y_binary = (y_idx == args.pos_class).int()
+                    y_true_all.extend(y_binary.cpu().numpy().tolist())
+                    y_score_all.extend(score.cpu().numpy().tolist())
+            y_true = np.array(y_true_all)
+            y_score = np.array(y_score_all)
+            if len(np.unique(y_true)) > 2:
+                y_binary = (y_true == args.pos_class).astype(int)
+            else:
+                y_binary = y_true
+            out_dir_for_plots = _save_pred_to_outdir(args.save_pred) or "."
+            plot_roc_and_distribution(y_binary, y_score, out_dir=out_dir_for_plots, prefix="best_")
+            print("[INFO] ROC and score distribution plots generated for best epoch.")
 
         if args.analyze_feature_importance and val_loader is not None:
             val_dataset = _unwrap_dataset(val_loader.dataset)

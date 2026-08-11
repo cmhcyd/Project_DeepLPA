@@ -125,3 +125,63 @@ def plot_training_metrics(train_losses, val_losses, val_aucs, signal_efficiencie
         plt.savefig(str(out_path), dpi=300)
     finally:
         plt.close()
+
+def plot_roc_curve(y_true, y_score, out_path=None, title="ROC Curve", pos_label=1):
+    from sklearn.metrics import roc_curve, auc
+    import matplotlib.pyplot as plt
+
+    fpr, tpr, _ = roc_curve(y_true, y_score, pos_label=pos_label)
+    roc_auc = auc(fpr, tpr)
+
+    plt.figure(figsize=(8,6))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.3f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('Background Acceptance')
+    plt.ylabel('Signal Efficiency')
+    plt.title(title)
+    plt.legend(loc="lower right")
+    plt.grid(True, alpha=0.3)
+
+    if out_path:
+        plt.savefig(out_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"[INFO] ROC curve saved to {out_path}")
+    else:
+        plt.show()
+
+def plot_score_distribution(y_true, y_score, out_path=None, title="Score Distribution", bins=50):
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    pos_scores = y_score[y_true == 1]
+    neg_scores = y_score[y_true == 0]
+
+    plt.figure(figsize=(8,6))
+    plt.hist(pos_scores, bins=bins, alpha=0.6, label=f'Signal', color='blue', density=True)
+    plt.hist(neg_scores, bins=bins, alpha=0.6, label=f'Background', color='red', density=True)
+    # plt.hist(pos_scores, bins=bins, alpha=0.6, label=f'Signal (N={len(pos_scores)})', color='blue', density=True)
+    # plt.hist(neg_scores, bins=bins, alpha=0.6, label=f'Background (N={len(neg_scores)})', color='red', density=True)
+    plt.xlabel('Predicted Score (probability of positive class)')
+    plt.ylabel('Density')
+    plt.title(title)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    if out_path:
+        plt.savefig(out_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"[INFO] Score distribution saved to {out_path}")
+    else:
+        plt.show()
+
+def plot_roc_and_distribution(y_true, y_score, out_dir=None, prefix="", pos_label=1):
+    if out_dir is None:
+        out_dir = "."
+    import os
+    os.makedirs(out_dir, exist_ok=True)
+    roc_path = os.path.join(out_dir, f"{prefix}roc_curve.png")
+    dist_path = os.path.join(out_dir, f"{prefix}score_distribution.png")
+    plot_roc_curve(y_true, y_score, roc_path, pos_label=pos_label)
+    plot_score_distribution(y_true, y_score, dist_path)
