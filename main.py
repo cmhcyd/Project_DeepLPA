@@ -18,6 +18,7 @@ from utils.analyzeimportance import analyze_feature_importance
 from utils.analyze_correlation import analyze_feature_correlation
 from utils.analyze_correlation_target import analyze_correlation_with_target
 from utils.datacheck import check_data_quality
+from utils.analyze_feature_separability import analyze_feature_separability
 from captum.attr import IntegratedGradients
 from pathlib import Path
 from scipy.stats import ks_2samp
@@ -25,7 +26,6 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import train_test_split
 from typing import List, Tuple, Dict, Optional
-
 
 
 _HAS_SKLEARN = True
@@ -101,6 +101,7 @@ def parse_args():
     parser.add_argument("--analyze_target_correlation", action="store_true", help="Analyze correlation between model features and external target branches")
     parser.add_argument("--target_corr_branches", type=str, default="", help="Comma-separated scalar branch names not used as model inputs but to compute correlation with input features, e.g. mass,energy")
     parser.add_argument("--plot_roc", action="store_true", help="After training, evaluate best model on validation set and plot ROC + score distribution")
+    parser.add_argument("--analyze_feature_separability", action="store_true", help="desc_to_do")
     # Inference output/save options (support no-label inference)
     parser.add_argument("--save_pred", type=str, default="", help="Path to save inference results (.npy), leave empty to skip")
     parser.add_argument("--pred_prob", action="store_true", help="Classification: output class probabilities instead of discrete class (discrete class also saved)")
@@ -459,18 +460,28 @@ def evaluate(model, loader, criterion, device, task, pos_class=1, threshold=0.5)
     if task == "classification" and len(all_probs) > 0:
         probs = np.concatenate(all_probs, axis=0)
         labels = np.concatenate(all_labels, axis=0)
+        
+        n_classes = probs.shape[1]
+        
         try:
-            if probs.shape[1] == 2:
-                auc = (1.0-roc_auc_score(labels, probs[:, pos_class]))
+            if n_classes == 2:
+                auc = (1-roc_auc_score(labels, probs[:, pos_class]))
+                metrics["auc"] = float(auc)
+                
+                pos_prob = probs[:, pos_class]
+                preds_pos = (pos_prob >= threshold).astype(np.int64)
+                y_true = (labels == pos_class).astype(np.int64)
             else:
-                auc = (1.0-roc_auc_score(labels, probs, multi_class='ovr', average='macro'))
-        except Exception:
-            auc = float("nan")
-        metrics["auc"] = float(auc)
-        if probs.shape[1] == 2:
-            pos_prob = probs[:, pos_class]
-            preds_pos = (pos_prob >= threshold).astype(np.int64)
-            y_true = (labels == pos_class).astype(np.int64)
+                try:
+                    auc = roc_auc_score(labels, probs, multi_class='ovr', average='macro')
+                    metrics["auc"] = float(auc)
+                except Exception as e:
+                    print(f"Warning: Multi-class AUC calculation failed: {e}")
+                    metrics["auc"] = float("nan")
+                pos_prob = probs[:, pos_class]
+                preds_pos = (pos_prob >= threshold).astype(np.int64)
+                y_true = (labels == pos_class).astype(np.int64)
+            
             TP = np.sum((preds_pos == 1) & (y_true == 1))
             FP = np.sum((preds_pos == 1) & (y_true == 0))
             TN = np.sum((preds_pos == 0) & (y_true == 0))
@@ -479,13 +490,25 @@ def evaluate(model, loader, criterion, device, task, pos_class=1, threshold=0.5)
             N = max(1, TN + FP)
             tpr = TP / P
             fpr = FP / N
-            bkgt = TP / (TP + FP)
+            bkgt = TP / (TP + FP) if (TP + FP) > 0 else 0
+            
             metrics["sig_eff"] = float(tpr)
             metrics["bkg_acc"] = float(fpr)
             metrics["bkg_rej"] = float(1.0 - fpr)
             metrics["bkg_ratio"] = float(1.0 - bkgt)
             metrics["sig_num"] = float(TP)
             metrics["bkg_num"] = float(FP)
+            
+        except Exception as e:
+            print(f"Warning: Metric calculation failed: {e}")
+            metrics["auc"] = float("nan")
+            metrics["sig_eff"] = float("nan")
+            metrics["bkg_acc"] = float("nan")
+            metrics["bkg_rej"] = float("nan")
+            metrics["bkg_ratio"] = float("nan")
+            metrics["sig_num"] = float("nan")
+            metrics["bkg_num"] = float("nan")
+            
     return metrics
 
 @torch.no_grad()
@@ -640,6 +663,21 @@ def main():
 
     train_dataset, train_full_loader_for_save, test_dataset, train_loader, val_loader, test_loader, _, _ = get_datasets_and_loaders(args)
     print("DEBUG:3")
+
+    if args.analyze_feature_separability:
+        ref_dataset = train_dataset if train_dataset is not None else test_dataset
+        if ref_dataset is not None and len(ref_dataset) > 0:
+            feature_names = ref_dataset.get_feature_names()
+            X = ref_dataset.X
+            y = ref_dataset.y
+            out_dir = _save_pred_to_outdir(args.save_pred)
+            
+            analyze_feature_separability(
+                feature_names, X, y,
+                pos_class=args.pos_class,
+                out_dir=out_dir,
+                n_samples=args.fi_samples
+            )
 
     if train_dataset is not None and len(train_dataset) > 0:
         check_data_quality(train_dataset, "Training set")
@@ -934,28 +972,31 @@ def main():
                     y = y.to(device)
                     logits = model(x)
                     probs = torch.softmax(logits, dim=-1)
-                    if probs.shape[1] > args.pos_class:
-                        score = probs[:, args.pos_class]
-                    else:
-                        score = probs[:, 0]
-
+                    
                     if y.ndim == 2 and y.size(-1) == 1:
                         y_idx = y.view(-1)
                     elif y.ndim == 1:
                         y_idx = y
                     else:
                         y_idx = y.argmax(dim=-1)
-                    y_binary = (y_idx == args.pos_class).int()
-                    y_true_all.extend(y_binary.cpu().numpy().tolist())
-                    y_score_all.extend(score.cpu().numpy().tolist())
+                    
+                    y_true_all.extend(y_idx.cpu().numpy().tolist())
+                    y_score_all.append(probs.cpu().numpy())
+            
             y_true = np.array(y_true_all)
-            y_score = np.array(y_score_all)
-            if len(np.unique(y_true)) > 2:
-                y_binary = (y_true == args.pos_class).astype(int)
-            else:
-                y_binary = y_true
+            y_score = np.concatenate(y_score_all, axis=0)
+            
             out_dir_for_plots = _save_pred_to_outdir(args.save_pred) or "."
-            plot_roc_and_distribution(y_binary, y_score, out_dir=out_dir_for_plots, prefix="best_")
+            
+            # For multiclass, use appropriate class names if desired
+            class_names = None
+            if args.num_classes > 2:
+                # You can customize class names here based on your data
+                # For your case with 3 classes: is_sig, is_bkg, is_bkg_second
+                class_names = ['Signal', 'Background1', 'Background2']
+            
+            plot_roc_and_distribution(y_true, y_score, out_dir=out_dir_for_plots, 
+                                    prefix="best_", class_names=class_names)
             print("[INFO] ROC and score distribution plots generated for best epoch.")
 
         if args.analyze_feature_importance and val_loader is not None:

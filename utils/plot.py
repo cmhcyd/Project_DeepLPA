@@ -176,12 +176,161 @@ def plot_score_distribution(y_true, y_score, out_path=None, title="Score Distrib
     else:
         plt.show()
 
-def plot_roc_and_distribution(y_true, y_score, out_dir=None, prefix="", pos_label=1):
+def plot_multiclass_score_distribution(y_true, y_score, out_path=None, title="Score Distribution", bins=50, class_names=None):
+    """
+    Plot score distribution for multiclass classification.
+    For each class, plot the distribution of its predicted probability,
+    grouped by the true class (all classes shown in the same subplot).
+    
+    Parameters
+    ----------
+    y_true : array-like
+        True labels (integers)
+    y_score : array-like
+        Predicted probabilities of shape (n_samples, n_classes)
+    out_path : str or None
+        Path to save the plot
+    title : str
+        Plot title
+    bins : int
+        Number of histogram bins
+    class_names : list or None
+        List of class names for legend
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    y_score = np.asarray(y_score)
+    y_true = np.asarray(y_true).flatten()
+    
+    if y_score.ndim == 1:
+        # Binary classification case
+        plot_score_distribution(y_true, y_score, out_path, title, bins)
+        return
+    
+    n_classes = y_score.shape[1]
+    unique_classes = np.unique(y_true)
+    # If some classes missing in y_true, still keep all n_classes
+    
+    if class_names is None:
+        class_names = [f'Class {i}' for i in range(n_classes)]
+    elif len(class_names) < n_classes:
+        class_names = [f'Class {i}' for i in range(n_classes)]
+    
+    # Determine subplot grid
+    n_cols = min(3, n_classes)
+    n_rows = (n_classes + n_cols - 1) // n_cols
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6*n_cols, 5*n_rows))
+    if n_classes == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten()
+    
+    # Use a color map for true classes
+    cmap = plt.cm.tab10(np.linspace(0, 1, n_classes))
+    
+    for i in range(n_classes):
+        ax = axes[i]
+        scores = y_score[:, i]  # predicted probability for class i
+        
+        # For each true class, plot its score distribution
+        for k in range(n_classes):
+            mask = (y_true == k)
+            if np.sum(mask) == 0:
+                continue
+            ax.hist(scores[mask], bins=bins, alpha=0.5, 
+                    label=f'{class_names[k]} (N={np.sum(mask)})',
+                    color=cmap[k], density=True)
+        
+        ax.set_xlabel(f'Predicted Probability for {class_names[i]}')
+        ax.set_ylabel('Density')
+        ax.set_title(f'Class {i}: {class_names[i]}')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
+    # Hide empty subplots
+    for i in range(n_classes, len(axes)):
+        axes[i].axis('off')
+    
+    plt.suptitle(title, fontsize=14, y=1.02)
+    plt.tight_layout()
+    
+    if out_path:
+        plt.savefig(out_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"[INFO] Multi-class score distribution saved to {out_path}")
+    else:
+        plt.show()
+
+def plot_multiclass_roc_curve(y_true, y_score, out_path=None, title="Multiclass ROC Curves", class_names=None):
+    """
+    Plot ROC curves for multiclass classification (one-vs-rest).
+    """
+    from sklearn.metrics import roc_curve, auc
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    y_score = np.asarray(y_score)
+    y_true = np.asarray(y_true).flatten()
+    
+    n_classes = y_score.shape[1]
+    
+    if class_names is None:
+        class_names = [f'Class {i}' for i in range(n_classes)]
+    elif len(class_names) < n_classes:
+        class_names = [f'Class {i}' for i in range(n_classes)]
+    
+    plt.figure(figsize=(10, 8))
+    
+    colors = plt.cm.tab10(np.linspace(0, 1, n_classes))
+    
+    for i in range(n_classes):
+        y_binary = (y_true == i).astype(int)
+        fpr, tpr, _ = roc_curve(y_binary, y_score[:, i])
+        roc_auc = auc(fpr, tpr)
+        
+        plt.plot(fpr, tpr, color=colors[i], lw=2, 
+                label=f'Class {i}: {class_names[i]} (AUC = {roc_auc:.3f})')
+    
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate (Background Acceptance)')
+    plt.ylabel('True Positive Rate (Signal Efficiency)')
+    plt.title(title)
+    plt.legend(loc="lower right")
+    plt.grid(True, alpha=0.3)
+    
+    if out_path:
+        plt.savefig(out_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"[INFO] Multiclass ROC curves saved to {out_path}")
+    else:
+        plt.show()
+
+def plot_roc_and_distribution(y_true, y_score, out_dir=None, prefix="", pos_label=1, class_names=None):
+    """
+    Plot ROC curve and score distribution for both binary and multiclass.
+    """
     if out_dir is None:
         out_dir = "."
     import os
     os.makedirs(out_dir, exist_ok=True)
-    roc_path = os.path.join(out_dir, f"{prefix}roc_curve.png")
-    dist_path = os.path.join(out_dir, f"{prefix}score_distribution.png")
-    plot_roc_curve(y_true, y_score, roc_path, pos_label=pos_label)
-    plot_score_distribution(y_true, y_score, dist_path)
+    
+    y_score = np.asarray(y_score)
+    y_true = np.asarray(y_true).flatten()
+    
+    if y_score.ndim == 2 and y_score.shape[1] > 1:
+        roc_path = os.path.join(out_dir, f"{prefix}roc_curve_multiclass.png")
+        dist_path = os.path.join(out_dir, f"{prefix}score_distribution_multiclass.png")
+        
+        plot_multiclass_roc_curve(y_true, y_score, roc_path, class_names=class_names)
+        plot_multiclass_score_distribution(y_true, y_score, dist_path, class_names=class_names)
+    else:
+        if y_score.ndim == 2 and y_score.shape[1] == 1:
+            y_score = y_score.flatten()
+        roc_path = os.path.join(out_dir, f"{prefix}roc_curve.png")
+        dist_path = os.path.join(out_dir, f"{prefix}score_distribution.png")
+        plot_roc_curve(y_true, y_score, roc_path, pos_label=pos_label)
+        plot_score_distribution(y_true, y_score, dist_path)
