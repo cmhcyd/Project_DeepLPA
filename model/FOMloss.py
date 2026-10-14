@@ -30,12 +30,12 @@ class FOMLoss(nn.Module):
         n_pos = pos_mask.sum().float()
 
         if n_pos == 0:
-            return torch.tensor(0.0, device=inputs.device, requires_grad=True)
-
-        if self.normalize_by_pos:
-            S = S / (n_pos + self.eps)
+            return inputs.sum() * 0.0
 
         denom = torch.sqrt(S + B + self.eps)
         fom = S / denom
+        if self.normalize_by_pos:
+            fom = fom / (n_pos + self.eps)
+
         loss = -fom
         return loss

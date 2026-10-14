@@ -4,6 +4,35 @@ import torch
 import numpy as np
 import uproot
 
+
+def normalize_features(X, norm_stats):
+    mean = np.asarray(norm_stats["mean"], dtype=np.float32)
+    std = np.asarray(norm_stats["std"], dtype=np.float32)
+    valid_shapes = ((X.shape[1],), (1, X.shape[1]))
+    if mean.shape not in valid_shapes or std.shape not in valid_shapes:
+        raise ValueError("Scaler dimensions must match the input feature dimension")
+    if not np.isfinite(mean).all() or not np.isfinite(std).all() or (std <= 0).any():
+        raise ValueError("Scaler mean/std must be finite and standard deviations positive")
+    if not np.isfinite(X).all():
+        raise ValueError("Normalization requires finite input features")
+    return ((X - mean) / std).astype(np.float32)
+
+
+def validate_classification_targets(y, num_classes):
+    if y is None:
+        raise ValueError("Classification training requires target branches")
+    labels = np.asarray(y)
+    if not np.isfinite(labels).all():
+        raise ValueError("Classification targets must be finite")
+    if labels.ndim == 2 and labels.shape[1] > 1:
+        if labels.shape[1] != num_classes or not np.isin(labels, (0, 1)).all() or not (labels.sum(axis=1) == 1).all():
+            raise ValueError("Classification targets must be valid one-hot labels with num_classes columns")
+    else:
+        if labels.ndim > 2 or (labels.ndim == 2 and labels.shape[1] != 1):
+            raise ValueError("Classification targets must be class indices or one-hot labels")
+        if not (labels == np.floor(labels)).all() or (labels < 0).any() or (labels >= num_classes).any():
+            raise ValueError("Class indices must be integers in [0, num_classes)")
+
 class ParticleDataset(Dataset):
     """
     Input specification:
@@ -117,6 +146,9 @@ class ParticleDataset(Dataset):
                 available = set(tree.keys())
                 read_list = [b for b in branches_to_read if b in available]
                 missing = branches_to_read - set(read_list)
+                missing_required = set(self.scalar_branches + array_branch_names + self.target_branches) - available
+                if missing_required:
+                    raise KeyError(f"Required branches missing in {file}: {sorted(missing_required)}")
                 if missing:
                     print(f"Warning: Missing branches in {file}: {sorted(list(missing))}")
 
@@ -177,11 +209,13 @@ class ParticleDataset(Dataset):
                                 try:
                                     tv = arrays[tb][i]
                                     if isinstance(tv, np.ndarray):
-                                        v = float(np.asarray(tv).reshape(-1)[0]) if tv.size > 0 else 0.0
+                                        if tv.size == 0:
+                                            raise ValueError("Empty target")
+                                        v = float(np.asarray(tv).reshape(-1)[0])
                                     else:
                                         v = float(tv)
-                                except Exception:
-                                    v = 0.0
+                                except (ValueError, TypeError) as error:
+                                    raise ValueError(f"Invalid target branch {tb} at entry {i} in {file}") from error
                             else:
                                 v = 0.0
                             tgt_vals.append(v)
@@ -221,6 +255,6 @@ class ParticleDataset(Dataset):
                 mean = X.mean(axis=0, keepdims=True)
                 std = X.std(axis=0, keepdims=True) + 1e-8
                 self.norm_stats = {"mean": mean, "std": std}
-            X = (X - mean) / std
+            X = normalize_features(X, {"mean": mean, "std": std})
 
         return X.astype(np.float32), (y.astype(np.float32) if y is not None else None), (extra.astype(np.float32) if extra is not None else None)

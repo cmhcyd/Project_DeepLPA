@@ -16,7 +16,7 @@ def check_data_quality(dataset, name="dataset"):
         print(f"Feature mean: {X_numpy.mean():.6f}")
         print(f"Feature std: {X_numpy.std():.6f}")
     
-    if hasattr(dataset, 'y') and len(dataset.y) > 0:
+    if getattr(dataset, 'y', None) is not None and len(dataset.y) > 0:
         y_numpy = dataset.y
         nan_count = np.isnan(y_numpy).sum()
         inf_count = np.isinf(y_numpy).sum()

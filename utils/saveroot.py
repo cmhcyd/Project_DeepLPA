@@ -169,7 +169,7 @@ def save_merged_root(output_root: str, tree_name: str, dataset,
 
     extra_tree_list = _as_list(extra_trees)
     with uproot.recreate(out_path) as fout:
-        fout[tree_name] = out_branches
+        fout.mktree(tree_name, out_branches)
         for et in extra_tree_list:
             if et == tree_name:
                 continue
@@ -178,9 +178,9 @@ def save_merged_root(output_root: str, tree_name: str, dataset,
                 print(f"[WARN] Extra tree '{et}' not found in any input file, skipping")
                 continue
             if hasattr(merged_extra, "fields"):
-                fout[et] = {name: merged_extra[name] for name in merged_extra.fields}
+                fout.mktree(et, {name: merged_extra[name] for name in merged_extra.fields})
             else:
-                fout[et] = merged_extra
+                fout.mktree(et, merged_extra)
     print(f"[OK] Written merged ROOT: {out_path}")
     return out_path
 
@@ -290,7 +290,7 @@ def save_split_root(output_root: str, tree_name: str, dataset,
             _ensure_dir_for_file(str(out_file))
 
             with uproot.recreate(str(out_file)) as fout:
-                fout[tree_name] = out_branches
+                fout.mktree(tree_name, out_branches)
                 for et in extra_tree_list:
                     if et == tree_name:
                         continue
@@ -307,7 +307,7 @@ def save_split_root(output_root: str, tree_name: str, dataset,
                             branch_dict = dict(arr_et)
                         except Exception:
                             branch_dict = arr_et
-                    fout[et] = branch_dict
+                    fout.mktree(et, branch_dict)
 
             written.append(str(out_file))
         start = end

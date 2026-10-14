@@ -13,7 +13,7 @@ import time
 from utils.utils import _parse_name_list, get_files, build_dataset_kwargs, move_input_to_device, _unwrap_dataset, enable_train_hook, check_model_eval_state, _save_pred_to_outdir
 from utils.plot import plot_training_metrics, plot_roc_and_distribution
 from utils.saveroot import save_split_root, save_merged_root
-from utils.dataset import ParticleDataset
+from utils.dataset import ParticleDataset, normalize_features, validate_classification_targets
 from utils.analyzeimportance import analyze_feature_importance
 from utils.analyze_correlation import analyze_feature_correlation
 from utils.analyze_correlation_target import analyze_correlation_with_target
@@ -26,6 +26,7 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import train_test_split
 from typing import List, Tuple, Dict, Optional
+from utils.hyperparameter_search import run_hyperparameter_search
 
 
 _HAS_SKLEARN = True
@@ -75,13 +76,28 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=5e-3, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--hpo", action="store_true", help="Search hyperparameters and save the best validation checkpoint")
+    parser.add_argument("--hpo_space", type=str, default="", help='JSON lists of candidates, e.g. {"lr":[1e-5,5e-5],"model_args.width":[256,512]}')
+    parser.add_argument("--hpo_trials", type=int, default=20, help="Trial budget; Optuna may repeat configurations")
+    parser.add_argument("--hpo_method", choices=["random", "grid", "tpe", "optuna"], default="random", help="Random, grid, categorical TPE, or Optuna TPE search")
+    parser.add_argument("--hpo_startup_trials", type=int, default=5, help="Successful random trials before TPE adapts (at least 2)")
+    parser.add_argument("--hpo_metric", choices=["auto", "auc", "loss"], default="auto", help="Validation metric: maximize AUC or minimize loss")
+    parser.add_argument("--hpo_seed", type=int, default=42, help="Search sampling and training seed")
+    parser.add_argument("--hpo_results", type=str, default="", help="Search results JSON path; defaults to <ckpt>.hpo.json")
+    parser.add_argument("--hpo_pruner", choices=["none", "median"], default="none", help="Optuna pruning; disabled by default")
+    parser.add_argument("--hpo_prune_warmup_epochs", type=int, default=5, help="Epochs protected from median pruning")
+    parser.add_argument("--hpo_storage", type=str, nargs="?", const="auto", default="", help="Save Optuna journal file; omit path to use <ckpt>.hpo.study.log")
+    parser.add_argument("--hpo_study_name", type=str, default="deeplpa", help="Optuna study name")
+    parser.add_argument("--hpo_resume", action="store_true", help="Resume an existing Optuna study; trials are additional")
+    parser.add_argument("--hpo_visualize", action="store_true", help="Export Optuna interactive HTML plots after search")
+    parser.add_argument("--hpo_plot_dir", type=str, default="", help="Plot directory; defaults to <ckpt>.hpo_plots")
     parser.add_argument("--device", type=str, default="cuda", help="cpu/cuda")
     parser.add_argument("--load_ckpt", type=str, default="", help="Load model weights from this checkpoint before training (for fine-tuning or resuming). If not provided, start training from scratch.")
     # Early stopping
     parser.add_argument("--early_stop_patience", type=int, default=0,
                     help="Number of epochs with no improvement after which training stops. 0 = disable.")
-    parser.add_argument("--early_stop_metric", type=str, default="loss",
-                    help="Metric to trigger the early stopping, loss or AUC")
+    parser.add_argument("--early_stop_metric", type=str.lower, choices=["loss", "auc"], default="loss",
+                    help="Metric to trigger early stopping: loss or AUC (case-insensitive)")
     parser.add_argument("--early_stop_min_delta", type=float, default=0.0,
                     help="Minimum change in monitored metric to qualify as improvement.")
     # Evaluation/split
@@ -108,7 +124,7 @@ def parse_args():
     parser.add_argument("--store_root", action="store_true", help="Write inference (and optionally training) results to ROOT file")
     parser.add_argument("--store_root_per_file", action="store_true", help="Write inference results per input file to separate ROOT files")
     # Inference/normalization
-    parser.add_argument("--scaler_file", type=str, default="", help="Normalization file (.npz) containing mean and std to load during inference (overrides runtime calculation)")
+    parser.add_argument("--scaler_file", type=str, default="", help="Scaler .npz with mean/std; enables normalization and overrides fitting")
     parser.add_argument("--save_scaler", type=str, default="", help="Save computed normalization statistics to this path (.npz) during training")
     return parser.parse_args()
 
@@ -116,22 +132,16 @@ def get_datasets_and_loaders(args):
     reg_target_names_list = _parse_name_list(getattr(args, "reg_target_names", "") or "")
     extra_scalar_branches = _parse_name_list(getattr(args, "target_corr_branches", "") or "")
 
+    norm_stats = None
     if getattr(args, "scaler_file", ""):
-        sf = args.scaler_file
-        if os.path.exists(sf):
-            try:
-                data = np.load(sf)
-                if "mean" in data and "std" in data:
-                    norm_stats = {"mean": data["mean"], "std": data["std"]}
-                    print(f"[INFO] Loaded norm_stats from scaler_file: {sf}")
-                else:
-                    print(f"[WARN] scaler_file {sf} does not contain mean/std keys, ignoring.")
-            except Exception as e:
-                print(f"[WARN] Failed to load scaler_file {sf}: {e}")
-        else:
-            print(f"[WARN] Specified scaler_file does not exist: {sf}")
-    else:
-        norm_stats = None
+        with np.load(args.scaler_file, allow_pickle=False) as data:
+            if "mean" not in data or "std" not in data:
+                raise ValueError("Scaler file must contain mean and std")
+            norm_stats = {"mean": data["mean"], "std": data["std"]}
+        print(f"[INFO] Loaded norm_stats from scaler_file: {args.scaler_file}")
+    normalize = args.normalize or norm_stats is not None
+    if args.mode == "infer" and normalize and norm_stats is None:
+        raise ValueError("Normalized inference requires --scaler_file from training")
 
     train_files = get_files(args.data_dir, "train")
     test_files = get_files(args.data_dir, "infer")
@@ -140,51 +150,21 @@ def get_datasets_and_loaders(args):
     train_full_loader_for_save = None
     train_loader = None
     val_loader = None
-    norm_stats = None
     
     if len(train_files) > 0:
         train_kwargs = build_dataset_kwargs(args, norm_stats=None, reg_target_names_list=reg_target_names_list)
+        train_kwargs["normalize"] = False
         train_kwargs["extra_scalar_branches"] = extra_scalar_branches
         train_dataset = ParticleDataset(root_files=train_files, **train_kwargs)
         
-        if args.normalize and len(train_dataset) > 0:
-            norm_stats = None
-            if len(train_dataset) > 0 and args.normalize:
-                if hasattr(train_dataset, "norm_stats") and train_dataset.norm_stats:
-                    ns = train_dataset.norm_stats
-                    if isinstance(ns, dict) and "mean" in ns and "std" in ns:
-                        norm_stats = {"mean": ns["mean"], "std": ns["std"]}
-                if norm_stats is None:
-                    try:
-                        X = getattr(train_dataset, "X", None)
-                        if X is None:
-                            raise AttributeError("train_dataset has no X attribute, cannot compute mean/std.")
-                        import numpy as _np
-                        if hasattr(X, "numpy"):
-                            X_np = X.numpy()
-                        else:
-                            X_np = _np.asarray(X)
-                        mean = X_np.mean(axis=0, keepdims=True)
-                        std = X_np.std(axis=0, keepdims=True) + 1e-8
-                        norm_stats = {"mean": mean, "std": std}
-                    except Exception as e:
-                        print(f"[WARN] Failed to compute norm_stats from train_dataset.X: {e}")
-                        norm_stats = None
-
-                if norm_stats is not None:
-                    train_kwargs = build_dataset_kwargs(args, norm_stats=norm_stats, reg_target_names_list=reg_target_names_list)
-                    train_kwargs["extra_scalar_branches"] = extra_scalar_branches
-                    train_dataset = ParticleDataset(root_files=train_files, **train_kwargs)
-                    if getattr(args, "save_scaler", ""):
-                        try:
-                            np.savez(args.save_scaler, mean=norm_stats["mean"], std=norm_stats["std"])
-                            print(f"[INFO] Saved norm_stats to {args.save_scaler}")
-                        except Exception as e:
-                            print(f"[WARN] Failed to save norm_stats to {args.save_scaler}: {e}")
-
+        if args.task == "classification" and (args.mode == "train" or train_dataset.has_target):
+            validate_classification_targets(train_dataset.y, args.num_classes)
+        train_indices = np.arange(len(train_dataset))
         if args.mode == "train" and len(train_dataset) > 0:
             val_size = int(args.val_ratio * len(train_dataset))
             train_size = len(train_dataset) - val_size
+            if not 0 < val_size < len(train_dataset):
+                raise ValueError("--val_ratio must produce non-empty training and validation sets")
             
             if _HAS_SKLEARN:
                 if args.task == "classification" and train_dataset.has_target:
@@ -217,7 +197,23 @@ def get_datasets_and_loaders(args):
                     [train_size, val_size],
                     generator=torch.Generator().manual_seed(args.split_seed)
                 )
+                train_indices = np.asarray(train_subset.indices)
             
+        if normalize and len(train_dataset) > 0:
+            X = train_dataset.X.numpy()
+            if norm_stats is None:
+                fit_X = X[train_indices]
+                norm_stats = {"mean": fit_X.mean(axis=0, keepdims=True),
+                              "std": fit_X.std(axis=0, keepdims=True) + 1e-8}
+            train_dataset.X = torch.from_numpy(normalize_features(X, norm_stats))
+            train_dataset.norm_stats = norm_stats
+            train_dataset.normalize = True
+            if getattr(args, "save_scaler", ""):
+                os.makedirs(os.path.dirname(os.path.abspath(args.save_scaler)), exist_ok=True)
+                np.savez(args.save_scaler, mean=norm_stats["mean"], std=norm_stats["std"])
+                print(f"[INFO] Saved norm_stats to {args.save_scaler}")
+            
+        if args.mode == "train" and len(train_dataset) > 0:
             train_loader = DataLoader(train_subset, batch_size=args.batch_size, shuffle=True,
                                       num_workers=args.num_workers, pin_memory=True)
             val_loader = DataLoader(val_subset, batch_size=args.batch_size, shuffle=False,
@@ -234,10 +230,15 @@ def get_datasets_and_loaders(args):
     
     if len(test_files) > 0:
         test_kwargs = build_dataset_kwargs(args, norm_stats=norm_stats, reg_target_names_list=reg_target_names_list if (args.task=="regression" and reg_target_names_list) else None)
+        test_kwargs["normalize"] = normalize
+        if normalize and norm_stats is None:
+            raise ValueError("Normalized inference requires training statistics or --scaler_file")
         test_kwargs["extra_scalar_branches"] = extra_scalar_branches
         if args.task == "classification" and not args.target_branches:
             test_kwargs["target_branches"] = []
         test_dataset = ParticleDataset(root_files=test_files, **test_kwargs)
+        if args.task == "classification" and test_dataset.has_target:
+            validate_classification_targets(test_dataset.y, args.num_classes)
         test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False,
                                  num_workers=args.num_workers, pin_memory=True)
     
@@ -465,7 +466,7 @@ def evaluate(model, loader, criterion, device, task, pos_class=1, threshold=0.5)
         
         try:
             if n_classes == 2:
-                auc = (1-roc_auc_score(labels, probs[:, pos_class]))
+                auc = roc_auc_score((labels == pos_class).astype(np.int64), probs[:, pos_class])
                 metrics["auc"] = float(auc)
                 
                 pos_prob = probs[:, pos_class]
@@ -651,6 +652,10 @@ def save_predictions_for_loader(model, loader, args, device, task, tag: str, for
 def main():
     print("DEBUG:0")
     args = parse_args()
+    if args.hpo and args.mode != "train":
+        raise ValueError("--hpo requires --mode train")
+    if args.task == "regression" and not args.hpo and args.early_stop_metric != "loss":
+        raise ValueError("Regression early stopping requires --early_stop_metric loss")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print("DEBUG:1")
     
@@ -688,6 +693,11 @@ def main():
         return
     in_dim = ref_ds.X.shape[1]
     print(f"Input dimension: {in_dim}")
+
+    if args.hpo:
+        run_hyperparameter_search(args, in_dim, train_loader, val_loader, device,
+                                  import_class, train_one_epoch, evaluate)
+        return
 
     # Dynamically load model
     model_class = import_class(args.model_class)
@@ -865,6 +875,7 @@ def main():
 
         out_loader_for_save = loader
     else:
+        os.makedirs(os.path.dirname(os.path.abspath(args.ckpt)), exist_ok=True)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
         train_losses = []
@@ -913,10 +924,8 @@ def main():
                 auc_improved = (np.isfinite(val_aucs[-1]) and val_aucs[-1] > best_auc + args.early_stop_min_delta)
                 if args.early_stop_metric == "loss":
                     is_better = loss_improved
-                elif args.early_stop_metric == "AUC":
+                elif args.early_stop_metric == "auc":
                     is_better = auc_improved
-                else:
-                    is_better = loss_improved or auc_improved
             else:
                 is_better = val_losses[-1] < best_val - args.early_stop_min_delta
             epoch_end = time.time()
