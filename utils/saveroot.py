@@ -32,6 +32,15 @@ def _as_list(x: Optional[Union[str, List[str]]]) -> List[str]:
         return [s for s in (t.strip() for t in x.split(",")) if s]
     return []
 
+def _validate_event_mask(event_mask, event_count):
+    if event_mask is None:
+        return None
+    mask = np.asarray(event_mask)
+    if mask.dtype != np.bool_ or mask.shape != (event_count,):
+        raise ValueError("event_mask must be a boolean array matching the full event count")
+    return mask
+
+
 def _concat_tree_across_files(root_files: List[str], tree_name: str) -> ak.Array:
     arrays_per_file = []
     fields_ref = None
@@ -64,11 +73,14 @@ def save_merged_root(output_root: str, tree_name: str, dataset,
                      keep_branches_param: str = "ALL",
                      reg_pred_name: str = "pred",
                      reg_target_names: Optional[List[str]] = None,
-                     extra_trees: Optional[Union[str, List[str]]] = None):
+                     extra_trees: Optional[Union[str, List[str]]] = None,
+                     event_mask: np.ndarray = None):
     """
     Write merged output: original branches of the main tree + model outputs into one ROOT file.
     Additional trees can be copied as separate trees.
     Requires dataset.root_files and dataset.file_event_counts with event order matching concatenation.
+    event_mask selects main-tree events; predictions must cover the full dataset in source order.
+    Extra trees are copied unchanged because their entries need not correspond to events.
     """
     root_files = list(dataset.root_files)
     file_event_counts = list(dataset.file_event_counts)
@@ -161,6 +173,10 @@ def save_merged_root(output_root: str, tree_name: str, dataset,
     if train_mask is not None:
         out_branches["is_train"] = np.asarray(train_mask).astype(np.int8)
 
+    event_mask = _validate_event_mask(event_mask, N)
+    if event_mask is not None:
+        out_branches = {name: values[event_mask] for name, values in out_branches.items()}
+
     base, ext = os.path.splitext(output_root)
     if ext == "":
         ext = ".root"
@@ -194,11 +210,15 @@ def save_split_root(output_root: str, tree_name: str, dataset,
                     keep_branches_param="ALL",
                     reg_pred_name: str = "pred",
                     reg_target_names: Optional[List[str]] = None,
-                    extra_trees: Optional[Union[str, List[str]]] = None):
+                    extra_trees: Optional[Union[str, List[str]]] = None,
+                    event_mask: np.ndarray = None,
+                    output_suffix: str = "_pred"):
     """
     Write per input file: each output file contains the main tree (original branches + model outputs) and specified extra trees (copied as is).
     - output_root: if a directory or does not end with .root, output to that directory; if a .root path, use its parent directory.
     - output filename: <input_filename_stem>_pred.root
+    - event_mask selects main-tree events in source order; extra trees are copied unchanged.
+    - output_suffix overrides _pred for additional subset files.
     """
     import pathlib
 
@@ -206,6 +226,8 @@ def save_split_root(output_root: str, tree_name: str, dataset,
     file_event_counts = list(dataset.file_event_counts)
     if len(root_files) != len(file_event_counts):
         raise ValueError("dataset.root_files and dataset.file_event_counts length mismatch")
+
+    event_mask = _validate_event_mask(event_mask, sum(file_event_counts))
 
     out_root = output_root or ""
     out_path = pathlib.Path(out_root)
@@ -285,8 +307,14 @@ def save_split_root(output_root: str, tree_name: str, dataset,
             if train_mask_i is not None:
                 out_branches["is_train"] = train_mask_i.astype(np.int8)
 
+            if event_mask is not None:
+                mask_i = event_mask[start:end]
+                if len(arr_main) != n:
+                    raise ValueError("dataset.file_event_counts does not match the input tree")
+                out_branches = {name: values[mask_i] for name, values in out_branches.items()}
+
             stem = pathlib.Path(rf).stem
-            out_file = out_dir / f"{stem}_pred.root"
+            out_file = out_dir / f"{stem}{output_suffix}.root"
             _ensure_dir_for_file(str(out_file))
 
             with uproot.recreate(str(out_file)) as fout:

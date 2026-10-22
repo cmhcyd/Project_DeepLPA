@@ -71,6 +71,26 @@ remains one-based for compatibility: `pred_prob_1` corresponds to model class 0,
 `pred_prob_2` to class 1, and so on. `pred_class` uses zero-based class indices.
 An optional `is_train` branch records the training split.
 
+With `--mode train --store_root --save_pred outputs/pred.root`, training finishes
+by exporting predictions from the saved best checkpoint to:
+
+- `outputs/pred_train.root`: the complete input sample from `DATA/train` (existing output).
+- `outputs/pred_train_subset.root`: only the events actually used for training.
+- `outputs/pred_test_subset.root`: only the held-out events from the same split.
+- `outputs/pred_infer.root`: the separate `DATA/infer` sample, when present (existing output).
+
+Here `test_subset` is the validation subset selected by `--val_ratio` and
+`--split_seed`, also used for early stopping; it is not an additional independent
+test sample. No second split or prediction pass is performed. All three training
+sample outputs contain an `is_train` flag (1 for training, 0 for held-out events),
+the requested original branches, and predictions, in original input order.
+With `--store_root_per_file`, the corresponding names are
+`<input_stem>_pred.root`, `<input_stem>_train_subset.root`, and
+`<input_stem>_test_subset.root`. Empty subsets still produce valid empty trees.
+Trees requested by `--copy_extra_trees` are copied unchanged because their rows
+need not correspond to main-tree events. HPO mode still returns after searching;
+run normal training with the selected configuration to produce these outputs.
+
 Binary AUC treats `--pos_class` as positive. Multiclass AUC is macro-averaged
 one-vs-rest. `bkg_acc` is FP/(TN+FP); `bkg_rej` is one minus that rate;
 `bkg_ratio` is FP/(TP+FP), the background fraction among selected events.

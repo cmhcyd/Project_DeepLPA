@@ -121,7 +121,7 @@ def parse_args():
     # Inference output/save options (support no-label inference)
     parser.add_argument("--save_pred", type=str, default="", help="Path to save inference results (.npy), leave empty to skip")
     parser.add_argument("--pred_prob", action="store_true", help="Classification: output class probabilities instead of discrete class (discrete class also saved)")
-    parser.add_argument("--store_root", action="store_true", help="Write inference (and optionally training) results to ROOT file")
+    parser.add_argument("--store_root", action="store_true", help="Write ROOT predictions; after training also save full, training-subset and held-out-subset files")
     parser.add_argument("--store_root_per_file", action="store_true", help="Write inference results per input file to separate ROOT files")
     # Inference/normalization
     parser.add_argument("--scaler_file", type=str, default="", help="Scaler .npz with mean/std; enables normalization and overrides fitting")
@@ -590,7 +590,8 @@ def collect_predictions_from_loader(model, loader, device, task, force_save_prob
 
     return y_true_all, pred_class_all, pred_prob_all, pred_value_all
 
-def save_predictions_for_loader(model, loader, args, device, task, tag: str, force_save_prob=True):
+def save_predictions_for_loader(model, loader, args, device, task, tag: str, force_save_prob=True,
+                                train_indices=None):
     if loader is None:
         print(f"[WARN] No loader to save for {tag}, skipping.")
         return
@@ -607,16 +608,21 @@ def save_predictions_for_loader(model, loader, args, device, task, tag: str, for
         y_true_all = None
 
     ds_for_meta = _unwrap_dataset(loader.dataset)
+    train_mask = None
+    if train_indices is not None:
+        train_mask = np.zeros(len(ds_for_meta), dtype=bool)
+        train_mask[np.asarray(train_indices, dtype=np.int64)] = True
 
     base, ext = os.path.splitext(args.save_pred)
     if ext == "":
         ext = ".root"
-    out_root = f"{base}_{tag}{ext}"
 
     if args.store_root:
-        if getattr(args, "store_root_per_file", False):
-            written_paths = save_split_root(
-                output_root=args.save_pred,
+        outputs = [(tag, None)]
+        if train_mask is not None:
+            outputs.extend([("train_subset", train_mask), ("test_subset", ~train_mask)])
+        for output_tag, event_mask in outputs:
+            save_kwargs = dict(
                 tree_name=args.tree_name,
                 dataset=ds_for_meta,
                 task=task,
@@ -624,30 +630,24 @@ def save_predictions_for_loader(model, loader, args, device, task, tag: str, for
                 pred_class=pred_class_all if (task == "classification" and pred_class_all is not None) else None,
                 pred_prob=pred_prob_all if (task == "classification" and pred_prob_all is not None) else None,
                 pred_value=pred_value_all if (task == "regression" and pred_value_all is not None) else None,
-                train_mask=None,
+                train_mask=train_mask,
                 keep_branches_param=args.keep_branches,
                 reg_pred_name=reg_pred_name,
                 reg_target_names=reg_target_names_list if reg_target_names_list else None,
-                extra_trees=args.copy_extra_trees
+                extra_trees=args.copy_extra_trees,
+                event_mask=event_mask
             )
-            print(f"[INFO] Saved {tag} predictions per file to {len(written_paths)} ROOT files")
-        else:
-            save_merged_root(
-                output_root=out_root,
-                tree_name=args.tree_name,
-                dataset=ds_for_meta,
-                task=task,
-                y_true=y_true_all,
-                pred_class=pred_class_all if (task == "classification" and pred_class_all is not None) else None,
-                pred_prob=pred_prob_all if (task == "classification" and pred_prob_all is not None) else None,
-                pred_value=pred_value_all if (task == "regression" and pred_value_all is not None) else None,
-                train_mask=None,
-                keep_branches_param=args.keep_branches,
-                reg_pred_name=reg_pred_name,
-                reg_target_names=reg_target_names_list if reg_target_names_list else None,
-                extra_trees=args.copy_extra_trees
-            )
-            print(f"[INFO] Saved {tag} predictions to {out_root}")
+            if getattr(args, "store_root_per_file", False):
+                written_paths = save_split_root(
+                    output_root=args.save_pred,
+                    output_suffix="_pred" if event_mask is None else f"_{output_tag}",
+                    **save_kwargs
+                )
+                print(f"[INFO] Saved {output_tag} predictions per file to {len(written_paths)} ROOT files")
+            else:
+                out_root = f"{base}_{output_tag}{ext}"
+                save_merged_root(output_root=out_root, **save_kwargs)
+                print(f"[INFO] Saved {output_tag} predictions to {out_root}")
 
 def main():
     print("DEBUG:0")
@@ -1069,7 +1069,9 @@ def main():
         save_predictions_for_loader(model, test_loader, args, device, args.task, tag="infer", force_save_prob=args.pred_prob)
 
         if args.mode == "train" and train_full_loader_for_save is not None:
-            save_predictions_for_loader(model, train_full_loader_for_save, args, device, args.task, tag="train", force_save_prob=True)
+            save_predictions_for_loader(model, train_full_loader_for_save, args, device, args.task,
+                                        tag="train", force_save_prob=True,
+                                        train_indices=train_loader.dataset.indices)
 
 if __name__ == "__main__":
     main()
