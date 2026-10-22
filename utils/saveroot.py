@@ -23,6 +23,22 @@ def _ensure_dir_for_file(path: str):
     if d and not os.path.exists(d):
         os.makedirs(d, exist_ok=True)
 
+def _write_ttree(directory, tree_name, branches):
+    # Older Uproot versions require types in mktree; data are written with extend.
+    # Keep scalar counters as NumPy arrays for older Uproot's count comparisons.
+    branches = {
+        name: ak.to_numpy(values)
+        if isinstance(values, ak.Array) and isinstance(ak.type(values).content, ak.types.NumpyType)
+        else values
+        for name, values in branches.items()
+    }
+    branch_types = {name: ak.type(values).content for name, values in branches.items()}
+    tree = directory.mktree(tree_name, branch_types)
+    if len(next(iter(branches.values()))) > 0:
+        tree.extend(branches)
+    return tree
+
+
 def _as_list(x: Optional[Union[str, List[str]]]) -> List[str]:
     if x is None:
         return []
@@ -185,7 +201,7 @@ def save_merged_root(output_root: str, tree_name: str, dataset,
 
     extra_tree_list = _as_list(extra_trees)
     with uproot.recreate(out_path) as fout:
-        fout.mktree(tree_name, out_branches)
+        _write_ttree(fout, tree_name, out_branches)
         for et in extra_tree_list:
             if et == tree_name:
                 continue
@@ -194,9 +210,9 @@ def save_merged_root(output_root: str, tree_name: str, dataset,
                 print(f"[WARN] Extra tree '{et}' not found in any input file, skipping")
                 continue
             if hasattr(merged_extra, "fields"):
-                fout.mktree(et, {name: merged_extra[name] for name in merged_extra.fields})
+                _write_ttree(fout, et, {name: merged_extra[name] for name in merged_extra.fields})
             else:
-                fout.mktree(et, merged_extra)
+                _write_ttree(fout, et, merged_extra)
     print(f"[OK] Written merged ROOT: {out_path}")
     return out_path
 
@@ -318,7 +334,7 @@ def save_split_root(output_root: str, tree_name: str, dataset,
             _ensure_dir_for_file(str(out_file))
 
             with uproot.recreate(str(out_file)) as fout:
-                fout.mktree(tree_name, out_branches)
+                _write_ttree(fout, tree_name, out_branches)
                 for et in extra_tree_list:
                     if et == tree_name:
                         continue
@@ -335,7 +351,7 @@ def save_split_root(output_root: str, tree_name: str, dataset,
                             branch_dict = dict(arr_et)
                         except Exception:
                             branch_dict = arr_et
-                    fout.mktree(et, branch_dict)
+                    _write_ttree(fout, et, branch_dict)
 
             written.append(str(out_file))
         start = end
