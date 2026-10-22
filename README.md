@@ -44,7 +44,12 @@ python main.py \
 `--array_spec '[tracks_pt,5],[tracks_eta,5]'` pads/truncates each array branch.
 Array ordering is defined by the input files. Required input and target branches
 must exist. Classification targets must be valid one-hot vectors or integer
-class indices in `[0, num_classes)`; omit target branches for unlabeled inference.
+class indices in `[0, num_classes)`. Training targets are required. For files in
+`DATA/infer`, targets are optional even when `--target_branches` (or regression
+`--reg_target_names`) is set for training: labels are loaded only if every
+inference file contains all requested target branches. Otherwise the entire
+inference sample is processed without labels and label-dependent metrics are
+skipped. Required input features are still checked for every file.
 Early-stopping metrics are `loss` and `auc`, accepting either case. Regression
 uses validation loss. Batch-normalized models need training batches with more
 than one event.

@@ -58,6 +58,36 @@ def make_args(directory, **kwargs):
 
 
 class PreprocessingTests(unittest.TestCase):
+    def test_inference_targets_are_optional_but_training_targets_are_required(self):
+        for task in ("classification", "regression"):
+            for mode in ("train", "infer"):
+                with self.subTest(task=task, mode=mode), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    write_events(root / "train" / "sample.root", np.arange(20), np.arange(20) % 2)
+                    # Labels remain available for metrics when every inference file has them.
+                    write_events(root / "infer" / "a.root", [1, 2], np.array([0, 1]))
+                    args = make_args(root, task=task, mode=mode)
+                    self.assertTrue(get_loaders(args)[2].has_target)
+                    # A mixed labeled/unlabeled sample must not build a partial target array.
+                    write_events(root / "infer" / "b.root", [3, 4])
+                    loaded = get_loaders(args)
+                    self.assertFalse(loaded[2].has_target)
+                    self.assertIsNone(loaded[2].y)
+                    self.assertEqual(len(loaded[2]), 4)
+                    self.assertIsInstance(next(iter(loaded[5])), torch.Tensor)
+                    # Partially available target branches also mean unlabeled inference.
+                    with uproot.recreate(root / "infer" / "b.root") as output:
+                        output.mktree("Tree1", {"feature": np.array([3, 4], dtype=np.float32),
+                                                "is_sig": np.array([0, 1], dtype=np.int32)})
+                    self.assertFalse(get_loaders(args)[2].has_target)
+                    with uproot.recreate(root / "infer" / "b.root") as output:
+                        output.mktree("Tree1", {"other": np.array([3, 4], dtype=np.float32)})
+                    with self.assertRaisesRegex(KeyError, "Required branches.*feature"):
+                        get_loaders(args)
+                    write_events(root / "train" / "sample.root", np.arange(20))
+                    with self.assertRaisesRegex(KeyError, "Required branches"):
+                        get_loaders(make_args(root, task=task))
+
     def test_scaler_fit_excludes_validation_and_is_reused_for_inference(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -72,8 +102,8 @@ class PreprocessingTests(unittest.TestCase):
             write_events(file, values, labels)
             write_events(root / "infer" / "sample.root", [2, 4])
             scaler = root / "outputs" / "scaler.npz"
-            write_events(root / "infer" / "sample.root", [2, 4], np.array([0, 1]))
             loaded = get_loaders(make_args(root, normalize=True, save_scaler=str(scaler)))
+            self.assertFalse(loaded[2].has_target)
             with np.load(scaler) as stats:
                 np.testing.assert_allclose(stats["mean"], [[values[train_indices].mean()]])
                 self.assertNotAlmostEqual(float(stats["mean"][0, 0]), float(values.mean()))

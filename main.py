@@ -234,8 +234,15 @@ def get_datasets_and_loaders(args):
         if normalize and norm_stats is None:
             raise ValueError("Normalized inference requires training statistics or --scaler_file")
         test_kwargs["extra_scalar_branches"] = extra_scalar_branches
-        if args.task == "classification" and not args.target_branches:
-            test_kwargs["target_branches"] = []
+        if test_kwargs["target_branches"]:
+            for file in test_files:
+                with uproot.open(file) as root_file:
+                    missing_targets = set(test_kwargs["target_branches"]) - set(root_file[args.tree_name].keys())
+                if missing_targets:
+                    print(f"[INFO] Optional inference targets missing in {file}: {sorted(missing_targets)}; "
+                          "processing all inference files without labels (metrics requiring labels are skipped).")
+                    test_kwargs["target_branches"] = []
+                    break
         test_dataset = ParticleDataset(root_files=test_files, **test_kwargs)
         if args.task == "classification" and test_dataset.has_target:
             validate_classification_targets(test_dataset.y, args.num_classes)
